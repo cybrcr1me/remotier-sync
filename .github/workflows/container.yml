@@ -16,28 +16,96 @@ env:
   IMAGE: ${{ github.repository }}
 
 jobs:
+  # Each architecture is compiled on a runner of that architecture.
+  #
+  # The obvious-looking alternative - one job with `platforms: linux/amd64,linux/arm64`
+  # and QEMU - emulates an entire Rust toolchain instruction by instruction, which turns a
+  # few minutes of compiling rustls, sqlx and axum into the better part of an hour. GitHub
+  # gives public repositories native arm64 runners; there is no reason to emulate.
   build:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-22.04
+          - platform: linux/arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-      # Lets the build attach a provenance attestation signed by this workflow, so a
-      # puller can verify the image came from this repo and not from someone with a
-      # token.
-      id-token: write
-      attestations: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      # No setup-qemu-action. Emulation is exactly what this layout exists to avoid.
       - uses: docker/setup-buildx-action@v3
 
-      # A pull request from a fork has no package write access, and pushing an image
-      # built from unreviewed code would be worse if it did. PRs build and throw away.
+      # A pull request from a fork has no package write access, and pushing an image built
+      # from unreviewed code would be worse if it did. PRs build and throw away.
       - name: Log in to the registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Pushed without a tag, by digest. The merge job below is what gives the pair a
+          # name - tagging here would have the two architectures race to own the tag, and
+          # whichever finished last would win outright rather than joining a manifest.
+          outputs: ${{ github.event_name != 'pull_request'
+            && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE)
+            || 'type=cacheonly' }}
+          # Scoped per architecture: one shared cache key would have each build evicting
+          # the other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          provenance: true
+          sbom: true
+
+      - name: Record the digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          # `/` is not allowed in an artifact name, and every platform contains one.
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # Joins the two digests into one multi-architecture tag, so `docker pull` picks the
+  # right image for whatever it is running on.
+  merge:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -49,7 +117,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=long
@@ -58,50 +125,42 @@ jobs:
             org.opencontainers.image.title=Remotier Sync
             org.opencontainers.image.description=Self-hostable sync server for Remotier
 
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          # arm64 matters here: a lot of self-hosting happens on a Pi or an Ampere VPS,
-          # and the whole selling point is that running one is easy.
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE }}@sha256:%s ' *)
+
+      - id: digest
+        run: |
+          digest=$(docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.meta.outputs.version }}" \
+            --format '{{json .Manifest}}' | jq -r .digest)
+          echo "value=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest the image
-        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.digest.outputs.value }}
           push-to-registry: true
 
-      # An image that starts, migrates and answers is the minimum worth publishing. The
-      # amd64 one is loaded locally because the runner cannot execute arm64 natively at
-      # any useful speed.
-      - name: Smoke test the image
-        if: github.event_name == 'pull_request'
-        run: echo "built for PR; smoke test runs in the smoke job"
-
+  # An image that starts, migrates and answers is the minimum worth publishing. Runs on
+  # the native amd64 runner and loads the image locally - no emulation here either.
   smoke:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build amd64 only, into the local daemon
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           load: true
           tags: remotier-sync:smoke
-          cache-from: type=gha
+          cache-from: type=gha,scope=linux/amd64
 
       - name: It starts, migrates and answers
         run: |
@@ -111,9 +170,7 @@ jobs:
             remotier-sync:smoke
 
           for _ in $(seq 1 30); do
-            if curl -fsS http://localhost:8787/v1/instance >/dev/null 2>&1; then
-              break
-            fi
+            curl -fsS http://localhost:8787/v1/instance >/dev/null 2>&1 && break
             sleep 1
           done
 
@@ -122,9 +179,9 @@ jobs:
           echo "$body" | grep -q '"name":"CI"'
           echo "$body" | grep -q '"registrationOpen":true'
 
-          # Registration closed by default is a security property, not a preference, so
-          # the flag is checked in both positions.
-          docker rm -f smoke
+      - name: Registration is closed unless asked for
+        # A security property, not a preference, so the flag is checked in both positions.
+        run: |
           docker run -d --name smoke-closed -p 8788:8787 remotier-sync:smoke
           for _ in $(seq 1 30); do
             curl -fsS http://localhost:8788/v1/instance >/dev/null 2>&1 && break
@@ -132,12 +189,19 @@ jobs:
           done
           curl -fsS http://localhost:8788/v1/instance | grep -q '"registrationOpen":false'
 
-      - name: Logs on failure
-        if: failure()
-        run: docker logs smoke 2>&1 || docker logs smoke-closed 2>&1 || true
+      - name: The healthcheck agrees
+        # The image ships no curl, so the binary checks itself. If this flag ever stops
+        # working the container silently reports healthy forever.
+        run: docker exec smoke remotier-sync-server --health-check
 
       - name: The image runs unprivileged
         run: |
           user=$(docker run --rm --entrypoint id remotier-sync:smoke -un)
           echo "runs as: $user"
           [ "$user" = "remotier" ]
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker logs smoke 2>&1 || true
+          docker logs smoke-closed 2>&1 || true

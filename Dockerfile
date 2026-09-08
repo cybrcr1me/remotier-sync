@@ -1,21 +1,7 @@
-# Two stages, so the shipped image carries no toolchain: a static-ish binary, CA
-# certificates, and no shell to get a foothold in.
-#
-# The base version is not decorative. Dependencies in this graph are edition 2024, which
-# needs Cargo 1.85 or newer; an older toolchain fails while parsing a transitive
-# manifest, which reads as a dependency problem rather than a toolchain one.
 FROM rust:1.90-bookworm AS build
 WORKDIR /src
 
-# Cargo fans out one rustc per CPU, and a release build of this graph wants well over a
-# gigabyte per job. A builder with many cores and little memory - a Docker Desktop VM left
-# on its default allocation, say - dies with "cannot allocate memory" rather than anything
-# that names the cause. Set this to 1 or 2 there; CI has the memory and leaves it alone.
-# Named BUILD_JOBS, not CARGO_BUILD_JOBS. Docker exposes every ARG to RUN as an
-# environment variable, and cargo reads CARGO_BUILD_JOBS natively as `build.jobs` - so an
-# ARG of that name sets it to the empty string on every build that does not pass one, and
-# cargo stops with "could not parse ``". The shell guard below is not enough on its own,
-# because the variable never has to reach the command line to do damage.
+
 ARG BUILD_JOBS=""
 
 # Manifests first, so editing source does not re-download and rebuild the whole registry.
