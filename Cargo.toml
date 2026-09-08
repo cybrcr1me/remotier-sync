@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = ["crates/remotier-sync-proto", "server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# edition 2024 appears in this dependency graph, and parsing those manifests needs
+# Cargo 1.85. An older toolchain fails while reading a transitive Cargo.toml, which reads
+# as a broken dependency rather than a stale compiler - so the floor is stated here and
+# pinned in the Dockerfile.
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/cybrcr1me/remotier-sync"
+
+[workspace.dependencies]
+remotier-sync-proto = { path = "crates/remotier-sync-proto" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.23"
+rand = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+# Same primitives, same versions, as the client's `src-tauri/Cargo.toml`. The
+# `ring`-not-`aws-lc-rs` constraint recorded there applies to everything here too:
+# no CMake, no NASM, no OpenSSL anywhere in the graph.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+sha2 = "0.10"
+hkdf = "0.12"
+argon2 = "0.5"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+
+# Server side. `tls-rustls-ring` rather than the default: aws-lc-rs wants CMake and
+# NASM, and the client's Cargo.toml already records why that is not acceptable here.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit", "cors"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "tls-rustls-ring", "sqlite", "postgres", "macros", "migrate",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+hex = "0.4"

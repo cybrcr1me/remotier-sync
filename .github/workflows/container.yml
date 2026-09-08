@@ -1,0 +1,143 @@
+name: container
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      # Lets the build attach a provenance attestation signed by this workflow, so a
+      # puller can verify the image came from this repo and not from someone with a
+      # token.
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # A pull request from a fork has no package write access, and pushing an image
+      # built from unreviewed code would be worse if it did. PRs build and throw away.
+      - name: Log in to the registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Remotier Sync
+            org.opencontainers.image.description=Self-hostable sync server for Remotier
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # arm64 matters here: a lot of self-hosting happens on a Pi or an Ampere VPS,
+          # and the whole selling point is that running one is easy.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Attest the image
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # An image that starts, migrates and answers is the minimum worth publishing. The
+      # amd64 one is loaded locally because the runner cannot execute arm64 natively at
+      # any useful speed.
+      - name: Smoke test the image
+        if: github.event_name == 'pull_request'
+        run: echo "built for PR; smoke test runs in the smoke job"
+
+  smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 only, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: remotier-sync:smoke
+          cache-from: type=gha
+
+      - name: It starts, migrates and answers
+        run: |
+          docker run -d --name smoke -p 8787:8787 \
+            -e REMOTIER_INSTANCE_NAME="CI" \
+            -e REMOTIER_REGISTRATION_OPEN=true \
+            remotier-sync:smoke
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8787/v1/instance >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          body=$(curl -fsS http://localhost:8787/v1/instance)
+          echo "$body"
+          echo "$body" | grep -q '"name":"CI"'
+          echo "$body" | grep -q '"registrationOpen":true'
+
+          # Registration closed by default is a security property, not a preference, so
+          # the flag is checked in both positions.
+          docker rm -f smoke
+          docker run -d --name smoke-closed -p 8788:8787 remotier-sync:smoke
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:8788/v1/instance >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8788/v1/instance | grep -q '"registrationOpen":false'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs smoke 2>&1 || docker logs smoke-closed 2>&1 || true
+
+      - name: The image runs unprivileged
+        run: |
+          user=$(docker run --rm --entrypoint id remotier-sync:smoke -un)
+          echo "runs as: $user"
+          [ "$user" = "remotier" ]

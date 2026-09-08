@@ -1,0 +1,29 @@
+# For an instance with more than a handful of people on it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# The schema is created on start either way; there is no separate migration step.
+services:
+  sync:
+    environment:
+      DATABASE_URL: "postgres://remotier:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db/remotier"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: remotier
+      POSTGRES_DB: remotier
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remotier"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  db-data:

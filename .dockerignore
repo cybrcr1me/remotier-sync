@@ -1,0 +1,16 @@
+# The build context is sent to the daemon in full. `target/` is gigabytes of local build
+# output that the image never wants and that a COPY into the build stage would clobber -
+# it filled the disk and failed the build before this file existed.
+target/
+**/target/
+
+.git/
+.github/
+*.db
+*.db-shm
+*.db-wal
+.env
+README.md
+docker-compose*.yml
+Dockerfile
+.dockerignore

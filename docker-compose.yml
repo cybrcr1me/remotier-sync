@@ -1,0 +1,21 @@
+# The self-host story: one service, one volume.
+#
+# Registration is closed by default. Open it, start your account, close it again - an
+# instance that accepts registrations the whole time it is reachable is an instance other
+# people's accounts end up on.
+services:
+  sync:
+    build: .
+    # image: ghcr.io/cybrcr1me/remotier-sync:latest
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      REMOTIER_INSTANCE_NAME: "My Remotier"
+      REMOTIER_REGISTRATION_OPEN: "false"
+      DATABASE_URL: "sqlite:///data/remotier-sync.db?mode=rwc"
+    volumes:
+      - sync-data:/data
+
+volumes:
+  sync-data:

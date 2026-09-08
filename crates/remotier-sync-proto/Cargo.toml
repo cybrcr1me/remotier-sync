@@ -1,0 +1,21 @@
+[package]
+name = "remotier-sync-proto"
+description = "Wire format and envelope crypto shared by the Remotier client and sync server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+chacha20poly1305.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+argon2.workspace = true
+x25519-dalek.workspace = true
