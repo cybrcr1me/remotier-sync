@@ -67,14 +67,21 @@ jobs:
           # the other's layers on every run.
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
-          provenance: true
-          sbom: true
+          # Off for the per-architecture builds, on purpose. Attestations are pushed as
+          # extra manifests, and `imagetools create` folds those into the final list as
+          # bogus `unknown/unknown` platform entries. The merge job attests the finished
+          # multi-architecture image instead, which is the thing anyone would verify.
+          provenance: false
+          sbom: false
 
       - name: Record the digest
         if: github.event_name != 'pull_request'
         run: |
+          # The `sha256:` prefix has to come off: upload-artifact rejects a colon in a
+          # path, because NTFS cannot represent one. The merge job puts it back.
+          digest="${{ steps.build.outputs.digest }}"
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
