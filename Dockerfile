@@ -11,9 +11,12 @@ WORKDIR /src
 # gigabyte per job. A builder with many cores and little memory - a Docker Desktop VM left
 # on its default allocation, say - dies with "cannot allocate memory" rather than anything
 # that names the cause. Set this to 1 or 2 there; CI has the memory and leaves it alone.
-# Passed through as a `--jobs` flag only when set, rather than as an env var: cargo
-# rejects an empty CARGO_BUILD_JOBS, so an unset build-arg would break the default build.
-ARG CARGO_BUILD_JOBS=""
+# Named BUILD_JOBS, not CARGO_BUILD_JOBS. Docker exposes every ARG to RUN as an
+# environment variable, and cargo reads CARGO_BUILD_JOBS natively as `build.jobs` - so an
+# ARG of that name sets it to the empty string on every build that does not pass one, and
+# cargo stops with "could not parse ``". The shell guard below is not enough on its own,
+# because the variable never has to reach the command line to do damage.
+ARG BUILD_JOBS=""
 
 # Manifests first, so editing source does not re-download and rebuild the whole registry.
 # The stub sources exist only to give cargo something to compile the dependencies against.
@@ -23,7 +26,7 @@ COPY server/Cargo.toml server/
 RUN mkdir -p crates/remotier-sync-proto/src server/src \
  && echo 'fn main() {}' > server/src/main.rs \
  && touch crates/remotier-sync-proto/src/lib.rs \
- && cargo build --release ${CARGO_BUILD_JOBS:+--jobs $CARGO_BUILD_JOBS} \
+ && cargo build --release ${BUILD_JOBS:+--jobs $BUILD_JOBS} \
       --bin remotier-sync-server
 
 # Deliberately not `|| true`. Swallowing a failure here does not skip a cache layer, it
@@ -34,7 +37,7 @@ COPY server server
 # The stub build left fingerprints saying these are already compiled; without this the
 # real code is never built and the binary stays a `fn main() {}`.
 RUN touch crates/remotier-sync-proto/src/lib.rs server/src/main.rs \
- && cargo build --release ${CARGO_BUILD_JOBS:+--jobs $CARGO_BUILD_JOBS} \
+ && cargo build --release ${BUILD_JOBS:+--jobs $BUILD_JOBS} \
       --bin remotier-sync-server
 
 FROM debian:bookworm-slim
